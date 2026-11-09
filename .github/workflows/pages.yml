@@ -31,6 +31,8 @@ jobs:
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
           VITE_QA: '1'
+          # 저장소 Settings → Secrets and variables → Actions → Variables 에 AI_ENDPOINT (프록시 주소, 키 아님)
+          VITE_AI_ENDPOINT: ${{ vars.AI_ENDPOINT }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

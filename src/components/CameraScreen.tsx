@@ -243,7 +243,7 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
         <p className="hint">
           {mode === 'stand'
             ? '폰을 눈높이에 세워두고 1~2m 떨어져 서세요. 화면 말고 카메라 렌즈를 보면 자세가 맞을 때 자동으로 찍혀요.'
-            : '팔 길이에서 찍고, 다음 화면에서 원근 보정으로 먼 거리 시점으로 바꿔요.'}
+            : '팔 길이에서 찍으면 1.5m 눈높이에서 본 모습으로 자동 보정돼요.'}
         </p>
 
         <div className="row">

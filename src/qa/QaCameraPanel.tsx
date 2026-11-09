@@ -200,9 +200,9 @@ export default function QaCameraPanel({ metricsRef }: { metricsRef: RefObject<Li
         })}
       </div>
 
-      <h4>3. 원근 보정</h4>
+      <h4>3. 보정 정확도</h4>
       <p className="hint">
-        ① 폰을 세워두고 1.5m에서 찍은 뒤 결과 화면에서 "기준 사진으로 지정" ② 같은 조명에서 팔 길이 셀카를 찍으면 보정 결과와 기준 사진의 얼굴 비율을 비교해요.
+        ① 폰을 세워두고 1.5m 눈높이에서 찍은 뒤 결과 화면에서 "기준 사진으로 지정" ② 같은 조명에서 팔 길이 셀카(아래에서 찍으면 각도도 검증)를 찍으면 보정 전·기본·AI 보정의 얼굴 비율 오차를 비교해요.
       </p>
 
       <div className="row qa-actions">

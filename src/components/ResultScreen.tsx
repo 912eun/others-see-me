@@ -1,14 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { IDX, faceWidthM } from '../lib/geometry';
-import { buildWarpMesh, noseScaleChange, renderWarp } from '../lib/warp';
-import {
-  LIGHTING_LABEL,
-  LUMINANCE,
-  approxDecimalAcuity,
-  pupilDiameterMm,
-  cssBlurSigmaPx,
-  type Lighting,
-} from '../lib/vision';
+import { IDX, estimatePose, faceWidthM, toPx, type PxLandmark } from '../lib/geometry';
+import { buildWarpMesh, renderWarp } from '../lib/warp';
+import { LIGHTING_LABEL, LUMINANCE, approxDecimalAcuity, cssBlurSigmaPx, pupilDiameterMm, type Lighting } from '../lib/vision';
+import { AiError, aiEndpoint, getConsent, needsCorrection, requestCorrection, setConsent, type Consent } from '../lib/ai';
+import { getLandmarker } from '../lib/landmarker';
 import type { Capture } from '../types';
 import { QA_ENABLED, RATIO_LABEL, addEntry, compareRatios, meshDstPoints } from '../qa/qa';
 
@@ -26,55 +21,68 @@ interface Rendered {
   url: string;
   /** 크롭 이미지 폭 대비 얼굴(광대) 폭 비율 */
   faceFrac: number;
-  naturalW: number;
 }
 
+type AiState =
+  | { s: 'off'; why: 'no_endpoint' | 'not_needed' | 'declined' }
+  | { s: 'ask' }
+  | { s: 'loading' }
+  | { s: 'done'; url: string; remaining?: number }
+  | { s: 'error'; message: string };
+
+const TARGET_M = 1.5;
+
 export default function ResultScreen({ capture, mirror, onMirrorChange, onRetake, reference, onSetReference }: Props) {
-  const [correct, setCorrect] = useState(capture.distM < 0.9);
-  const [shotDist, setShotDist] = useState(round2(clamp(capture.distM, 0.2, 2.5)));
-  const [viewDist, setViewDist] = useState(1.5);
-  const [myopia, setMyopia] = useState(0);
-  const [lighting, setLighting] = useState<Lighting>('indoor');
-  const [holdOriginal, setHoldOriginal] = useState(false);
-  const [corrected, setCorrected] = useState<Rendered | null>(null);
-  const [original, setOriginal] = useState<Rendered | null>(null);
-  const [err, setErr] = useState('');
-  const [correctedPts, setCorrectedPts] = useState<{ X: number; Y: number }[] | null>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const [displayW, setDisplayW] = useState(0);
+  const endpoint = useMemo(aiEndpoint, []);
+  const pose = useMemo(() => estimatePose(capture.lms), [capture]);
+  const distCm = Math.round(capture.distM * 100);
+  const pitchDeg = Math.round(pose.pitchDeg);
+  const need = needsCorrection(capture.distM, pose.pitchDeg);
 
-  // 크롭 영역은 원본 기준으로 한 번 정해 두고 보정본에도 같은 영역을 써서 비교가 정확하게
   const crop = useMemo(() => cropRect(capture), [capture]);
+  const original = useMemo(() => cropTo(capture.canvas, crop), [capture, crop]);
 
-  useEffect(() => {
-    setOriginal(cropTo(capture.canvas, crop));
+  // 기본 보정(기기 안): 가까이서 찍었을 때만 원근만 살짝. 슬라이더 없이 자동
+  const basic = useMemo(() => {
+    if (capture.distM >= 0.9) return null;
+    try {
+      const mesh = buildWarpMesh({ lms: capture.lms, w: capture.canvas.width, h: capture.canvas.height, fPx: capture.fPx, dM: capture.distM, targetM: TARGET_M });
+      const r = cropTo(renderWarp(capture.canvas, mesh), crop);
+      return { ...r, pts: meshDstPoints(mesh.dst) };
+    } catch {
+      return null;
+    }
   }, [capture, crop]);
 
+  const [consent, setConsentState] = useState<Consent>(getConsent);
+  const [ai, setAi] = useState<AiState>(() =>
+    !endpoint ? { s: 'off', why: 'no_endpoint' } : !need ? { s: 'off', why: 'not_needed' } : getConsent() === 'no' ? { s: 'off', why: 'declined' } : getConsent() === 'yes' ? { s: 'loading' } : { s: 'ask' },
+  );
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
-    if (!correct) return;
-    const t = setTimeout(() => {
-      try {
-        const mesh = buildWarpMesh({
-          lms: capture.lms,
-          w: capture.canvas.width,
-          h: capture.canvas.height,
-          fPx: capture.fPx,
-          dM: shotDist,
-          targetM: viewDist,
-        });
-        const warped = renderWarp(capture.canvas, mesh);
-        // 보정 후 얼굴 폭은 메시의 dst 좌표에서
-        const r = cropTo(warped, crop);
-        r.faceFrac = Math.abs(mesh.dst[2 * IDX.leftCheek] - mesh.dst[2 * IDX.rightCheek]) / crop.w;
-        setCorrected(r);
-        setCorrectedPts(meshDstPoints(mesh.dst));
-        setErr('');
-      } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e));
-      }
-    }, 120);
-    return () => clearTimeout(t);
-  }, [capture, crop, correct, shotDist, viewDist]);
+    if (!endpoint || !need || consent !== 'yes') return;
+    const ctrl = new AbortController();
+    setAi({ s: 'loading' });
+    requestCorrection(endpoint, original.url, { distCm, pitchDeg }, ctrl.signal)
+      .then((r) => setAi({ s: 'done', url: r.image, remaining: r.remaining }))
+      .catch((e: AiError) => !ctrl.signal.aborted && setAi({ s: 'error', message: e.message }));
+    return () => ctrl.abort();
+  }, [endpoint, need, consent, original.url, distCm, pitchDeg, attempt]);
+
+  const answerConsent = (c: 'yes' | 'no') => {
+    setConsent(c);
+    setConsentState(c);
+    if (c === 'no') setAi({ s: 'off', why: 'declined' });
+  };
+
+  const [holdOriginal, setHoldOriginal] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [viewDist, setViewDist] = useState(TARGET_M);
+  const [myopia, setMyopia] = useState(0);
+  const [lighting, setLighting] = useState<Lighting>('indoor');
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [displayW, setDisplayW] = useState(0);
 
   useEffect(() => {
     const el = imgRef.current;
@@ -82,33 +90,24 @@ export default function ResultScreen({ capture, mirror, onMirrorChange, onRetake
     const ro = new ResizeObserver(() => setDisplayW(el.clientWidth));
     ro.observe(el);
     return () => ro.disconnect();
-  }, [original]);
+  }, []);
 
-  const shown = !holdOriginal && correct && corrected ? corrected : original;
+  const corrected = ai.s === 'done' ? { url: ai.url, label: 'AI 보정' } : basic ? { url: basic.url, label: '기본 보정' } : null;
+  const shownUrl = holdOriginal || !corrected ? original.url : corrected.url;
+  const badge = holdOriginal || !corrected ? '보정 전' : corrected.label;
 
-  const realFaceW = faceWidthM(capture.lms, capture.fPx, shotDist);
   const sigma =
-    shown && displayW > 0 && myopia > 0
+    displayW > 0 && myopia > 0
       ? cssBlurSigmaPx({
           myopiaD: myopia,
           viewDistM: viewDist,
           pupilMm: pupilDiameterMm(LUMINANCE[lighting]),
-          faceWidthM: realFaceW,
-          faceWidthDisplayPx: shown.faceFrac * displayW,
+          faceWidthM: faceWidthM(capture.lms, capture.fPx, capture.distM),
+          faceWidthDisplayPx: original.faceFrac * displayW,
         })
       : 0;
 
-  const noseDelta = noseScaleChange({
-    lms: capture.lms,
-    w: capture.canvas.width,
-    h: capture.canvas.height,
-    fPx: capture.fPx,
-    dM: shotDist,
-    targetM: viewDist,
-  });
-
   const save = () => {
-    if (!shown) return;
     const img = new Image();
     img.onload = () => {
       const c = document.createElement('canvas');
@@ -127,30 +126,67 @@ export default function ResultScreen({ capture, mirror, onMirrorChange, onRetake
       a.download = 'others-see-me.jpg';
       a.click();
     };
-    img.src = shown.url;
+    img.src = shownUrl;
   };
+
+  const angleText = Math.abs(pitchDeg) < 8 ? '눈높이' : pitchDeg < 0 ? `카메라가 ${Math.abs(pitchDeg)}° 아래` : `카메라가 ${pitchDeg}° 위`;
 
   return (
     <div className="result">
       <div className="photo-wrap">
-        {shown && (
-          <img
-            ref={imgRef}
-            src={shown.url}
-            alt="결과 사진"
-            className={mirror ? 'mirrored' : ''}
-            style={{ filter: sigma > 0.05 ? `blur(${sigma.toFixed(2)}px)` : undefined }}
-            onPointerDown={() => setHoldOriginal(true)}
-            onPointerUp={() => setHoldOriginal(false)}
-            onPointerLeave={() => setHoldOriginal(false)}
-            draggable={false}
-          />
-        )}
-        <span className="badge">
-          {holdOriginal ? '원본' : mirror ? '거울 속 내 모습' : '남이 보는 내 모습'}
-        </span>
+        <img
+          ref={imgRef}
+          src={shownUrl}
+          alt="결과 사진"
+          className={mirror ? 'mirrored' : ''}
+          style={{ filter: sigma > 0.05 ? `blur(${sigma.toFixed(2)}px)` : undefined }}
+          onPointerDown={() => setHoldOriginal(true)}
+          onPointerUp={() => setHoldOriginal(false)}
+          onPointerLeave={() => setHoldOriginal(false)}
+          onContextMenu={(e) => e.preventDefault()}
+          draggable={false}
+        />
+        <span className="badge">{badge}</span>
+        {ai.s === 'loading' && <div className="loading">남이 보는 얼굴로 보정하는 중…</div>}
       </div>
-      {correct && <p className="hint center">사진을 누르고 있으면 보정 전 원본이 보여요</p>}
+      <p className="hint center">
+        {distCm}cm · {angleText}에서 찍은 사진
+        {corrected ? ` → 1.5m 눈높이 시점으로 보정했어요. 꾹 누르면 보정 전` : need ? '' : ' · 이미 남이 보는 거리·각도라 그대로 보여드려요'}
+      </p>
+
+      {ai.s === 'ask' && (
+        <section className="card consent">
+          <h3>AI로 더 자연스럽게 보정할까요?</h3>
+          <p className="hint">
+            가까이서 찍으면 코가 커 보이고 귀·옆머리가 가려져요. AI 보정을 쓰면 이 사진이 Google Gemini로 전송돼 보정된 뒤 돌아와요. 이 앱의 서버는 사진을 저장하지 않아요.
+          </p>
+          <div className="actions tight">
+            <button className="secondary" onClick={() => answerConsent('no')}>
+              기본 보정만
+            </button>
+            <button className="shutter" onClick={() => answerConsent('yes')}>
+              동의하고 보정
+            </button>
+          </div>
+        </section>
+      )}
+      {ai.s === 'error' && (
+        <section className="card">
+          <p className="error">{ai.message}</p>
+          <p className="hint">{basic ? '대신 기기 안에서 한 기본 보정을 보여드리고 있어요.' : ''}</p>
+          <button className="secondary sm" onClick={() => setAttempt((n) => n + 1)}>
+            다시 시도
+          </button>
+        </section>
+      )}
+      {ai.s === 'off' && ai.why === 'declined' && need && (
+        <p className="hint center">
+          기본 보정만 쓰는 중 ·{' '}
+          <button className="link inline" onClick={() => answerConsent('yes')}>
+            AI 보정 켜기
+          </button>
+        </p>
+      )}
 
       <section className="card">
         <div className="seg">
@@ -161,76 +197,41 @@ export default function ResultScreen({ capture, mirror, onMirrorChange, onRetake
             거울 속 모습
           </button>
         </div>
-        <p className="hint">
-          남이 보는 모습이 어색한 건 정상이에요. 사람은 많이 본 쪽을 더 좋아해서, 나는 거울 속 내 얼굴을, 친구는 실제 내 얼굴을 더 좋아한대요.
-        </p>
+        <p className="hint">남이 보는 모습이 어색한 건 정상이에요. 나는 거울 속 내 얼굴에 더 익숙하거든요.</p>
       </section>
 
-      <section className="card">
-        <h3>상대와의 거리 {viewDist.toFixed(1)}m</h3>
-        <input type="range" min={0.5} max={5} step={0.1} value={viewDist} onChange={(e) => setViewDist(+e.target.value)} />
-        <div className="seg small">
-          {[
-            [1, '마주 앉아 대화'],
-            [1.5, '기준 거리'],
-            [2.7, '조금 떨어져서'],
-          ].map(([d, label]) => (
-            <button key={d} className={viewDist === d ? 'on' : ''} onClick={() => setViewDist(d as number)}>
-              {label as string} {d}m
-            </button>
-          ))}
-        </div>
-        <p className="hint">초상 사진의 기준 거리는 1.5m예요. 원근 보정과 시력 시뮬레이션에 함께 쓰여요.</p>
-      </section>
-
-      <section className="card">
-        <label className="switch big">
-          <input type="checkbox" checked={correct} onChange={(e) => setCorrect(e.target.checked)} /> 원근 보정
-        </label>
-        {correct && (
-          <>
-            <h4>촬영 거리 {shotDist.toFixed(2)}m</h4>
-            <input type="range" min={0.2} max={2.5} step={0.01} value={shotDist} onChange={(e) => setShotDist(+e.target.value)} />
-            <p className="hint">
-              {capture.source === 'photo' ? '사진 모드에서는 추정이 부정확할 수 있어요. 실제로 찍은 거리에 맞춰주세요. ' : ''}
-              이 거리에서 보면 얼굴 폭 대비 코 크기가 {noseDelta >= 0 ? '+' : ''}
-              {noseDelta.toFixed(0)}% 달라져요. 30cm 셀카는 코가 약 30% 크게 찍혀요.
-            </p>
-          </>
-        )}
-        {err && <p className="error">{err}</p>}
-      </section>
-
-      <section className="card">
-        <h3>
-          보는 사람의 시력{' '}
-          <span className="sub">
-            {myopia === 0 ? '정상(1.0)' : `근시 -${myopia.toFixed(2)}D · 맨눈 약 ${approxDecimalAcuity(myopia).toFixed(2)}`}
-          </span>
-        </h3>
-        <input type="range" min={0} max={6} step={0.25} value={myopia} onChange={(e) => setMyopia(+e.target.value)} />
-        <div className="seg small">
-          {(Object.keys(LIGHTING_LABEL) as Lighting[]).map((l) => (
-            <button key={l} className={lighting === l ? 'on' : ''} onClick={() => setLighting(l)}>
-              {LIGHTING_LABEL[l]}
-            </button>
-          ))}
-        </div>
-        <p className="hint">
-          안경을 벗은 근시인 사람 기준이에요. 어두울수록 동공이 커져(지금 약 {pupilDiameterMm(LUMINANCE[lighting]).toFixed(1)}mm) 더 흐릿하게 보여요. 시력 숫자는 개인차가 큰 근사치예요.
-        </p>
-      </section>
+      <button className="more-toggle" onClick={() => setShowMore((v) => !v)}>
+        {showMore ? '접기' : '더보기 · 시력별로 보기'}
+      </button>
+      {showMore && (
+        <section className="card">
+          <h3>
+            보는 사람의 시력{' '}
+            <span className="sub">
+              {myopia === 0 ? '정상(1.0)' : `근시 -${myopia.toFixed(2)}D · 맨눈 약 ${approxDecimalAcuity(myopia).toFixed(2)}`}
+            </span>
+          </h3>
+          <input type="range" min={0} max={6} step={0.25} value={myopia} onChange={(e) => setMyopia(+e.target.value)} />
+          <div className="seg small">
+            {[1, 1.5, 3].map((d) => (
+              <button key={d} className={viewDist === d ? 'on' : ''} onClick={() => setViewDist(d)}>
+                {d}m에서
+              </button>
+            ))}
+          </div>
+          <div className="seg small">
+            {(Object.keys(LIGHTING_LABEL) as Lighting[]).map((l) => (
+              <button key={l} className={lighting === l ? 'on' : ''} onClick={() => setLighting(l)}>
+                {LIGHTING_LABEL[l]}
+              </button>
+            ))}
+          </div>
+          <p className="hint">안경을 벗은 근시인 사람 기준의 근사치예요.</p>
+        </section>
+      )}
 
       {QA_ENABLED && onSetReference && (
-        <QaWarpCard
-          capture={capture}
-          reference={reference ?? null}
-          correctedPts={correct ? correctedPts : null}
-          correctedUrl={correct ? corrected?.url ?? null : null}
-          shotDist={shotDist}
-          viewDist={viewDist}
-          onSetReference={onSetReference}
-        />
+        <QaCompareCard capture={capture} reference={reference ?? null} basicPts={basic?.pts ?? null} aiUrl={ai.s === 'done' ? ai.url : null} onSetReference={onSetReference} />
       )}
 
       <div className="actions">
@@ -246,7 +247,6 @@ export default function ResultScreen({ capture, mirror, onMirrorChange, onRetake
 }
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
-const round2 = (v: number) => Math.round(v * 100) / 100;
 
 function cropRect(c: Capture) {
   const W = c.canvas.width;
@@ -276,97 +276,120 @@ function cropTo(src: HTMLCanvasElement, r: ReturnType<typeof cropRect>): Rendere
   out.width = Math.round(r.w * s);
   out.height = Math.round(r.h * s);
   out.getContext('2d')!.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
-  return { url: out.toDataURL('image/jpeg', 0.92), faceFrac: r.faceW / r.w, naturalW: out.width };
+  return { url: out.toDataURL('image/jpeg', 0.9), faceFrac: r.faceW / r.w };
 }
 
-// ---------------- 검증 모드: 원근 보정 vs 실제 1.5m 사진 ----------------
+async function detectInUrl(url: string): Promise<PxLandmark[] | null> {
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  c.getContext('2d')!.drawImage(img, 0, 0);
+  const lm = await getLandmarker('IMAGE');
+  const res = lm.detect(c);
+  return res.faceLandmarks[0] ? toPx(res.faceLandmarks[0], c.width, c.height) : null;
+}
 
-function QaWarpCard(props: {
+// ---------------- 검증 모드: 보정 결과 vs 실제 1.5m 사진 ----------------
+
+function QaCompareCard(props: {
   capture: Capture;
   reference: Capture | null;
-  correctedPts: { X: number; Y: number }[] | null;
-  correctedUrl: string | null;
-  shotDist: number;
-  viewDist: number;
+  basicPts: { X: number; Y: number }[] | null;
+  aiUrl: string | null;
   onSetReference: (c: Capture | null) => void;
 }) {
-  const { capture, reference, correctedPts, correctedUrl, shotDist, viewDist, onSetReference } = props;
+  const { capture, reference, basicPts, aiUrl, onSetReference } = props;
+  const [aiPts, setAiPts] = useState<PxLandmark[] | null | 'none'>(null);
   const [saved, setSaved] = useState('');
   const isRef = reference === capture;
+
+  useEffect(() => {
+    setAiPts(null);
+    if (!aiUrl) return;
+    detectInUrl(aiUrl)
+      .then((p) => setAiPts(p ?? 'none'))
+      .catch(() => setAiPts('none'));
+  }, [aiUrl]);
+
   const refUrl = useMemo(() => (reference ? cropTo(reference.canvas, cropRect(reference)).url : null), [reference]);
-  const rows = reference && !isRef && correctedPts ? compareRatios(reference.lms, capture.lms, correctedPts) : null;
-  const meanAbs = (k: 'origErr' | 'corrErr') => (rows ? rows.reduce((s, r) => s + Math.abs(r[k]), 0) / rows.length : 0);
+  const ready = reference && !isRef;
+  const base = ready ? compareRatios(reference.lms, capture.lms, capture.lms) : null;
+  const basicRows = ready && basicPts ? compareRatios(reference.lms, capture.lms, basicPts) : null;
+  const aiRows = ready && aiPts && aiPts !== 'none' ? compareRatios(reference.lms, capture.lms, aiPts) : null;
+  const mean = (rows: { corrErr: number }[] | null) => (rows ? rows.reduce((s, r) => s + Math.abs(r.corrErr), 0) / rows.length : NaN);
+  const fmt = (v: number) => (Number.isFinite(v) ? `${v.toFixed(1)}%` : '–');
 
   const record = (rating: number) => {
-    if (!rows || !reference) return;
+    if (!reference || !base) return;
     const values: Record<string, number | string | boolean> = {
-      refDistCm: +(reference.distM * 100).toFixed(0),
-      shotDistCm: +(shotDist * 100).toFixed(0),
-      estShotDistCm: +(capture.distM * 100).toFixed(0),
-      targetCm: +(viewDist * 100).toFixed(0),
-      origMeanErr: +meanAbs('origErr').toFixed(2),
-      corrMeanErr: +meanAbs('corrErr').toFixed(2),
+      refDistCm: Math.round(reference.distM * 100),
+      shotDistCm: Math.round(capture.distM * 100),
+      pitchDeg: Math.round(estimatePose(capture.lms).pitchDeg),
+      origMeanErr: +mean(base.map((r) => ({ corrErr: r.origErr }))).toFixed(2),
+      basicMeanErr: +mean(basicRows).toFixed(2),
+      aiMeanErr: +mean(aiRows).toFixed(2),
+      aiFaceFound: aiPts !== 'none',
       rating,
     };
-    for (const r of rows) {
-      values[`${r.key}_origErr`] = +r.origErr.toFixed(2);
-      values[`${r.key}_corrErr`] = +r.corrErr.toFixed(2);
-    }
-    addEntry({ kind: 'warp', label: `${values.shotDistCm}cm→${values.targetCm}cm`, values });
+    for (const r of base) values[`${r.key}_origErr`] = +r.origErr.toFixed(2);
+    for (const r of basicRows ?? []) values[`${r.key}_basicErr`] = +r.corrErr.toFixed(2);
+    for (const r of aiRows ?? []) values[`${r.key}_aiErr`] = +r.corrErr.toFixed(2);
+    addEntry({ kind: 'warp', label: `${values.shotDistCm}cm ${values.pitchDeg}°`, values });
     setSaved(`기록했어요 (체감 ${rating}점)`);
   };
 
   return (
     <section className="card qa">
-      <h3>검증 · 원근 보정</h3>
+      <h3>검증 · 보정 정확도</h3>
       <div className="row">
         <button className="secondary sm" onClick={() => onSetReference(isRef ? null : capture)}>
           {isRef ? '기준 사진 해제' : '이 사진을 기준 사진으로 지정'}
         </button>
-        <span className="hint">
-          {reference ? `기준: ${(reference.distM * 100).toFixed(0)}cm에서 촬영` : '기준 사진 없음 (1.5m에서 찍어 지정)'}
-        </span>
+        <span className="hint">{reference ? `기준: ${Math.round(reference.distM * 100)}cm` : '1.5m 눈높이에서 찍어 지정'}</span>
       </div>
 
-      {reference && !isRef && !correctedPts && <p className="hint">원근 보정을 켜면 기준 사진과 비교해요.</p>}
-
-      {rows && (
+      {ready && (
         <>
           <div className="qa-compare">
             <figure>
               {refUrl && <img src={refUrl} alt="기준 사진" />}
-              <figcaption>실제 {(reference!.distM * 100).toFixed(0)}cm</figcaption>
+              <figcaption>실제 {Math.round(reference.distM * 100)}cm</figcaption>
             </figure>
             <figure>
-              {correctedUrl && <img src={correctedUrl} alt="보정 결과" />}
-              <figcaption>보정 결과</figcaption>
+              {aiUrl && <img src={aiUrl} alt="AI 보정" />}
+              <figcaption>{aiUrl ? (aiPts === 'none' ? 'AI (얼굴 인식 실패)' : 'AI 보정') : 'AI 결과 없음'}</figcaption>
             </figure>
           </div>
-          <p className="hint">기준과 목표 거리를 맞추세요(상대와의 거리 = 기준 사진 거리). 지금 목표 {Math.round(viewDist * 100)}cm.</p>
           <table className="qa-table">
             <thead>
               <tr>
-                <th>얼굴 폭 대비</th>
-                <th>보정 전 오차</th>
-                <th>보정 후 오차</th>
+                <th>기준 대비 오차</th>
+                <th>보정 전</th>
+                <th>기본</th>
+                <th>AI</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {base!.map((r, i) => (
                 <tr key={r.key}>
                   <td>{RATIO_LABEL[r.key]}</td>
-                  <td>{r.origErr.toFixed(1)}%</td>
-                  <td className={Math.abs(r.corrErr) < Math.abs(r.origErr) ? 'good' : 'bad'}>{r.corrErr.toFixed(1)}%</td>
+                  <td>{fmt(r.origErr)}</td>
+                  <td>{basicRows ? fmt(basicRows[i].corrErr) : '–'}</td>
+                  <td className={aiRows ? (Math.abs(aiRows[i].corrErr) < Math.abs(r.origErr) ? 'good' : 'bad') : ''}>{aiRows ? fmt(aiRows[i].corrErr) : '–'}</td>
                 </tr>
               ))}
               <tr>
                 <td>평균 |오차|</td>
-                <td>{meanAbs('origErr').toFixed(1)}%</td>
-                <td className={meanAbs('corrErr') < meanAbs('origErr') ? 'good' : 'bad'}>{meanAbs('corrErr').toFixed(1)}%</td>
+                <td>{fmt(mean(base!.map((r) => ({ corrErr: r.origErr }))))}</td>
+                <td>{fmt(mean(basicRows))}</td>
+                <td>{fmt(mean(aiRows))}</td>
               </tr>
             </tbody>
           </table>
-          <p className="hint">기준 사진과 얼마나 같은 사람처럼 보여요? (체감 점수와 함께 기록)</p>
+          <p className="hint">AI 보정이 기준 사진과 얼마나 같은 사람처럼 보여요?</p>
           <div className="seg small">
             {[1, 2, 3, 4, 5].map((n) => (
               <button key={n} onClick={() => record(n)}>

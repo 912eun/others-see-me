@@ -1,0 +1,17 @@
+name = "others-see-me-ai"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+# 앱이 열리는 주소만 허용 (토스 미니앱 도메인은 출시 때 추가)
+ALLOWED_ORIGINS = "https://912eun.github.io,http://localhost:5173"
+PER_IP_DAILY = "5"
+GLOBAL_DAILY = "200"
+GEMINI_MODEL = "gemini-nano-banana-2.1"
+
+# npx wrangler kv namespace create USAGE 로 만든 id를 넣기
+[[kv_namespaces]]
+binding = "USAGE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# GEMINI_API_KEY 는 여기 적지 말고: npx wrangler secret put GEMINI_API_KEY
