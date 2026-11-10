@@ -13,6 +13,8 @@ import {
   type PxLandmark,
 } from '../lib/geometry';
 import { getLandmarker } from '../lib/landmarker';
+import { LiveRenderer } from '../lib/liveRenderer';
+import { CORRECTION, OneEuroArray, buildCorrectionMesh } from '../lib/cameraDistortion';
 import { loadSettings, saveSettings, type CameraSettings } from '../lib/settings';
 import type { Capture } from '../types';
 import QaCameraPanel from '../qa/QaCameraPanel';
@@ -30,6 +32,16 @@ interface Props {
 
 export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // 실시간 카메라 왜곡 보정 (기본 켬). 화면을 누르고 있으면 보정 전
+  const [correct, setCorrect] = useState(true);
+  const [holding, setHolding] = useState(false);
+  const correctRef = useRef(correct);
+  const holdRef = useRef(holding);
+  const mirrorRef = useRef(mirror);
+  correctRef.current = correct;
+  holdRef.current = holding;
+  mirrorRef.current = mirror;
   const [status, setStatus] = useState<'loading' | 'ready' | 'nocamera' | 'nomodel'>('loading');
   const [error, setError] = useState('');
   const [mode, setMode] = useState<Mode>('stand');
@@ -65,7 +77,8 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
       try {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia 미지원');
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // 매 프레임 인식+워프를 하므로 720p가 성능·화질 균형점
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
         });
         const v = videoRef.current!;
@@ -94,6 +107,15 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
       }
       setStatus('ready');
 
+      let renderer: LiveRenderer | null = null;
+      try {
+        renderer = new LiveRenderer(canvasRef.current!);
+      } catch {
+        renderer = null; // WebGL 불가: 원본 영상만 보여줌
+      }
+      const dispFilter = new OneEuroArray(CORRECTION.oneEuro.minCutoff, CORRECTION.oneEuro.beta, CORRECTION.oneEuro.dCutoff);
+      let noFace = 0;
+
       let lastTs = -1;
       const loop = () => {
         if (stopped) return;
@@ -116,6 +138,28 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
               g.distM = smoothDist.current;
             }
             setGuide(g);
+
+            // 실시간 카메라 왜곡 보정: 영상과 같은 프레임의 랜드마크로 메시를 만들고, 변위만 시간 평활
+            if (renderer) {
+              let mesh = null;
+              if (lms && correctRef.current && !holdRef.current && Number.isFinite(g.distM)) {
+                noFace = 0;
+                const m = buildCorrectionMesh(lms, w, h, fPx, g.distM, {
+                  perspective: true,
+                  wideAngle: true,
+                  targetM: Math.max(CORRECTION.targetM, g.distM), // 이미 먼 거리면 원근 보정 안 함
+                });
+                const disp = new Float64Array(m.dst.length);
+                for (let i = 0; i < disp.length; i++) disp[i] = m.dst[i] - m.src[i];
+                const sm = dispFilter.filter(disp, ts);
+                for (let i = 0; i < disp.length; i++) m.dst[i] = m.src[i] + sm[i];
+                mesh = m;
+              } else if (++noFace > 5) {
+                dispFilter.reset();
+              }
+              renderer.draw(v, w, h, mesh, mirrorRef.current);
+            }
+
             const fr = fpsRef.current;
             if (fr.last) fr.fps = fr.fps * 0.9 + (1000 / (ts - fr.last)) * 0.1;
             fr.last = ts;
@@ -210,13 +254,29 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
   return (
     <div className="camera">
       <div className="viewport">
-        <video ref={videoRef} playsInline muted className={mirror ? 'mirrored' : ''} />
+        <video ref={videoRef} playsInline muted className={'src-video' + (mirror ? ' mirrored' : '')} />
+        <canvas
+          ref={canvasRef}
+          className="live"
+          onPointerDown={() => setHolding(true)}
+          onPointerUp={() => setHolding(false)}
+          onPointerLeave={() => setHolding(false)}
+          onContextMenu={(e) => e.preventDefault()}
+        />
         <svg className="overlay" viewBox="0 0 100 133" preserveAspectRatio="xMidYMid slice">
           <ellipse cx="50" cy="58" rx="24" ry="32" className={ready ? 'oval ok' : 'oval'} />
           <line x1="20" x2="80" y1="50" y2="50" className="eyeline" />
         </svg>
         {count != null && count > 0 && <div className="countdown">{count}</div>}
         {status === 'loading' && <div className="toast">카메라와 얼굴 인식을 준비하고 있어요</div>}
+        {status === 'ready' && (
+          <>
+            <span className="badge">{distortionLabel(correct && !holding, guide)}</span>
+            <button className={'live-toggle' + (correct ? ' on' : '')} onClick={() => setCorrect((c) => !c)}>
+              왜곡 보정 {correct ? 'ON' : 'OFF'}
+            </button>
+          </>
+        )}
       </div>
 
       <div className="guide-panel">
@@ -268,6 +328,13 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
       </div>
     </div>
   );
+}
+
+function distortionLabel(on: boolean, g: GuideState | null): string {
+  if (!on) return '보정 전 (원본)';
+  if (!g || !Number.isFinite(g.distM)) return '카메라 왜곡 보정';
+  const cm = Math.round(g.distM * 100);
+  return g.distM >= CORRECTION.targetM - 0.05 ? `${cm}cm · 왜곡 거의 없음` : `${cm}cm → ${CORRECTION.targetM}m 시점으로 보정 중`;
 }
 
 function Calibration({ ipdMm, onApply }: { ipdMm: number; onApply: (cm: number, pdMm: number) => void }) {
