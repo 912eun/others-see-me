@@ -57,10 +57,39 @@
 | White, Burton, Kemp, *BJP* 2016 | 본인이 고른 '나 같은' 사진이 오히려 낯선 사람의 인식 정확도가 낮음, 웃는 사진이 유리 | 🔜 연속 촬영 후 blendshape `mouthSmile` 중간값 프레임 자동 선택 |
 | Chen et al., *CVPR* 2024 — Total Selfie | 셀카 → 타인 시점 전신사진 변환 | 참고 |
 
+## 7. 실시간 카메라 왜곡 보정 (미리보기)
+
+범위: 근거리 원근 왜곡 + 광각 투영 늘어짐만. 각도·조명·생김새는 건드리지 않음.
+
+| 연구 | 핵심 | 적용 |
+|---|---|---|
+| Fried et al., SIGGRAPH 2016 | 3D 헤드 피팅 → 거리 변경을 2D 워프로, 얼굴 밖 변위는 라플라시안으로 외삽 | ✅ 랜드마크별 배율 k = (1+ζ/d)/(1+ζ/D), 고정 격자에서 라플라시안 Jacobi로 빈 곳 채움 |
+| Zhao et al., ICCV 2019 | 목표 거리 1.6m(1.4~2m 무방), 가려진 귀는 인페인팅 필요 | ✅ 목표 1.5m, 메시 워프로 귀를 만들 수 없으니 윤곽·귀 배율 상한 1.1 |
+| Shih, Lai, Liang, SIGGRAPH 2019 | 얼굴만 스테레오그래픽, 배경은 원근 유지. r_u = r0·tan(½·atan(r_p/f)) | ✅ 얼굴 점에 Shih 식 적용 후 닮음변환으로 위치·크기 복원 |
+| Lai, Shih, Liang, Yang, IEEE TIP 2022 (arXiv 2111.09950) | 비디오 확장: 시간 평활항 λ_t=16 vs 얼굴항 λ_f=4. 사용자 100%가 시간 안정성 때문에 선호. 가중치 tanh(2r/r_max) | ✅ 얼굴 크기로 정규화한 변위를 u = 0.2·raw + 0.8·prev로 평활, 광각 보정 강도 tanh(2r/r_max) |
+| Tan et al., CVPR 2021 | LineAcc·ShapeAcc 지표 | 🔜 검증 모드 지표 후보 |
+| Casiez et al., CHI 2012 (1€ 필터) | 속도 적응 저역통과 | ✅ 촬영 거리 d에 적용 (minCutoff 0.8Hz, β 0.4) |
+| Liu et al., SIGGRAPH 2009 / 2013 | 고정 격자 워프, 이웃 결합 평활 | ✅ 매 프레임 삼각분할 대신 고정 격자(위상 고정) + 이전 해에서 시작(warm start) |
+| MediaPipe Iris 블로그 | 홍채 11.7mm, 오차 4.3% | ✅ 깊이 ζ를 홍채로 미터 환산 → 초점거리 오차는 d로만 영향 |
+| DxOMark (iPhone 13 Pro 전면 23mm 환산) | 4:3 긴 변 화각 약 74° | ✅ 기본 초점거리 가정 70° → 74° |
+
+측정(합성 얼굴, 깊이 노이즈 ±15px): 보정 떨림 1.81px → 0.27px/프레임, 계산 0.3ms/프레임(노트북 기준).
+
+남은 한계: 귀·옆머리처럼 셀카에서 가려진 부분은 생기지 않음(인페인팅 필요). 일부 사용자는 근거리 원근의 갸름한 얼굴을 선호한다는 보고(Lai 2022).
+
 ## 남은 불확실성
 - 기기별 화각: 캘리브레이션 전 거리는 추정치 → UI에 "(추정)" 표기
 - 디옵터↔시력 환산: 아동 데이터 기반 → "근사치" 표기
 - 원근 보정: 가까이서 가려졌던 귀·옆머리는 복원 불가(워프의 한계)
+
+## Sources (7절 추가)
+- https://arxiv.org/abs/2111.09950
+- https://openaccess.thecvf.com/content/CVPR2021/html/Tan_Practical_Wide-Angle_Portraits_Correction_With_Deep_Structured_Models_CVPR_2021_paper.html
+- https://hal.archives-ouvertes.fr/hal-00670496
+- https://pages.cs.wisc.edu/~fliu/project/3dstab.htm
+- https://www.microsoft.com/en-us/research/?p=326732
+- https://www.dxomark.com/apple-iphone-13-pro-selfie-test-retested/
+- https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker
 
 ## Sources
 - https://pmc.ncbi.nlm.nih.gov/articles/PMC5876805/

@@ -18,6 +18,10 @@ export interface LiveMetrics {
   issues: string[];
   fps: number;
   calibrated: boolean;
+  /** 실시간 보정: 직전 프레임 대비 얼굴 변위 변화 RMS(px) — 정지 상태 떨림 지표 */
+  jitterPx?: number;
+  correctedFace?: { X: number; Y: number }[] | null;
+  rawFace?: PxLandmark[];
 }
 
 export const runtime = {

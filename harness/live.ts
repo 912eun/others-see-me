@@ -1,6 +1,6 @@
 // 실시간 보정 렌더러 시각 확인용: 합성 얼굴(가까이서 찍은 것처럼 투영) → 보정 전/후
 import { LiveRenderer } from '../src/lib/liveRenderer';
-import { buildCorrectionMesh, CORRECTION } from '../src/lib/cameraDistortion';
+import { LiveCorrector } from '../src/lib/cameraDistortion';
 import { IDX, type PxLandmark } from '../src/lib/geometry';
 
 const W = 720, H = 960, f = 780; // 세로 화면, 긴 변 화각 약 63°
@@ -29,7 +29,8 @@ for (const [d, off, label] of [[0.3, 0, '30cm 중앙'], [0.3, 0.17, '30cm 가장
   for (const corr of [false, true]) {
     const cv = document.createElement('canvas'); cv.style.width = '190px';
     const r = new LiveRenderer(cv);
-    const mesh = corr ? buildCorrectionMesh(lms, W, H, f, d, { perspective: true, wideAngle: true, targetM: CORRECTION.targetM }) : null;
+    let mesh = null;
+    if (corr) { const lc = new LiveCorrector(); let ts = 0; for (let i = 0; i < 40; i++) mesh = lc.frame(lms, W, H, f, d, ts += 33, true); }
     r.draw(c, W, H, mesh, false);
     const wrap = document.createElement('div'); wrap.append(cv, document.createElement('br'), `${label} · ${corr ? '보정' : '원본'}`);
     row.append(wrap);

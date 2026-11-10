@@ -41,7 +41,9 @@ const dist2d = (a: PxLandmark, b: PxLandmark) => Math.hypot(a.X - b.X, a.Y - b.Y
 export const DEFAULT_IPD_M = 0.063; // 성인 평균 동공간 거리 (Dodgson 2004, 평균 약 63mm)
 /** 홍채 수평 직경은 사람 간 편차가 매우 작음: 11.7±0.5mm (Ablavatski et al. 2020, MediaPipe Iris) */
 export const IRIS_DIAMETER_M = 0.0117;
-export const DEFAULT_LONG_SIDE_FOV_DEG = 70; // 폰 전면 카메라 긴 변 화각 가정치 (보정 전)
+// 전면 카메라 23mm 환산(예: iPhone 13 Pro, DxOMark) → 4:3 긴 변 화각 약 74°.
+// 원근 보정량은 홍채로 미터 환산한 깊이를 쓰므로 초점거리 오차는 거리 d를 통해서만 영향 (10% 오차 → 보정량 약 10%)
+export const DEFAULT_LONG_SIDE_FOV_DEG = 74; // 폰 전면 카메라 긴 변 화각 가정치 (보정 전)
 
 /** 초점거리(px) = 정규화 초점거리 × 긴 변 픽셀 */
 export function focalPx(fNorm: number, w: number, h: number): number {

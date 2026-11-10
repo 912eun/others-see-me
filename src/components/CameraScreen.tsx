@@ -14,7 +14,7 @@ import {
 } from '../lib/geometry';
 import { getLandmarker } from '../lib/landmarker';
 import { LiveRenderer } from '../lib/liveRenderer';
-import { CORRECTION, OneEuroArray, buildCorrectionMesh } from '../lib/cameraDistortion';
+import { CORRECTION, LiveCorrector } from '../lib/cameraDistortion';
 import { loadSettings, saveSettings, type CameraSettings } from '../lib/settings';
 import type { Capture } from '../types';
 import QaCameraPanel from '../qa/QaCameraPanel';
@@ -113,8 +113,7 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
       } catch {
         renderer = null; // WebGL 불가: 원본 영상만 보여줌
       }
-      const dispFilter = new OneEuroArray(CORRECTION.oneEuro.minCutoff, CORRECTION.oneEuro.beta, CORRECTION.oneEuro.dCutoff);
-      let noFace = 0;
+      const corrector = new LiveCorrector();
 
       let lastTs = -1;
       const loop = () => {
@@ -139,24 +138,9 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
             }
             setGuide(g);
 
-            // 실시간 카메라 왜곡 보정: 영상과 같은 프레임의 랜드마크로 메시를 만들고, 변위만 시간 평활
+            // 실시간 카메라 왜곡 보정: 고정 격자 변위장 (영상과 같은 프레임의 랜드마크 사용)
             if (renderer) {
-              let mesh = null;
-              if (lms && correctRef.current && !holdRef.current && Number.isFinite(g.distM)) {
-                noFace = 0;
-                const m = buildCorrectionMesh(lms, w, h, fPx, g.distM, {
-                  perspective: true,
-                  wideAngle: true,
-                  targetM: Math.max(CORRECTION.targetM, g.distM), // 이미 먼 거리면 원근 보정 안 함
-                });
-                const disp = new Float64Array(m.dst.length);
-                for (let i = 0; i < disp.length; i++) disp[i] = m.dst[i] - m.src[i];
-                const sm = dispFilter.filter(disp, ts);
-                for (let i = 0; i < disp.length; i++) m.dst[i] = m.src[i] + sm[i];
-                mesh = m;
-              } else if (++noFace > 5) {
-                dispFilter.reset();
-              }
+              const mesh = corrector.frame(lms, w, h, fPx, distRawM, ts, correctRef.current && !holdRef.current);
               renderer.draw(v, w, h, mesh, mirrorRef.current);
             }
 
@@ -177,6 +161,9 @@ export default function CameraScreen({ mirror, onMirrorChange, onCapture }: Prop
                   issues: g.issues,
                   fps: fr.fps,
                   calibrated: s.calibrated,
+                  jitterPx: corrector.jitterPx,
+                  correctedFace: corrector.correctedFace(),
+                  rawFace: lms,
                 }
               : null;
 

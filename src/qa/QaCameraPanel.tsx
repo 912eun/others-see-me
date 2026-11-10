@@ -79,6 +79,7 @@ export default function QaCameraPanel({ metricsRef }: { metricsRef: RefObject<Li
           calibrated: f.calibrated,
           res: `${f.w}x${f.h}`,
           fps: +f.fps.toFixed(1),
+          jitterPx: +(f.jitterPx ?? 0).toFixed(3),
         },
       }),
     );
@@ -135,6 +136,7 @@ export default function QaCameraPanel({ metricsRef }: { metricsRef: RefObject<Li
             <span>
               {m.w}×{m.h} · {m.fps.toFixed(0)}fps · f {m.fPx.toFixed(0)}px {m.calibrated ? '(보정됨)' : '(기본값)'}
             </span>
+            <span>실시간 보정 떨림 {(m.jitterPx ?? 0).toFixed(2)}px/프레임 (정지 시 0.5 이하 목표)</span>
           </>
         ) : (
           <span>얼굴 대기 중</span>
